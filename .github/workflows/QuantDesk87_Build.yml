@@ -1,0 +1,121 @@
+name: QuantDesk V8.7 - Two-Year A-HK Downloader APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Unpack exact V8.7 source ZIP and verify files
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import os, zipfile, tempfile
+          root=Path(os.environ['GITHUB_WORKSPACE'])
+          required=['android-app/settings.gradle',
+                    'android-app/app/src/main/java/com/quantdesk/v85/HarvestService.java',
+                    'android-app/app/src/main/java/com/quantdesk/v85/HarvestPolicy.java',
+                    'android-app/app/src/main/java/com/quantdesk/v85/DailyBar.java',
+                    'android-app/app/src/main/java/com/quantdesk/v85/NativeCollector.java',
+                    'android-app/app/src/main/java/com/quantdesk/v85/VaultDb.java',
+                    'collector/pyproject.toml','tests/HarvestPolicyTest.java']
+          def project(p):return all((p/x).is_file() for x in required)
+          archive=root/'QuantDesk87_2Year_Source.zip'
+          if archive.exists():
+              destination=Path(tempfile.mkdtemp(prefix='quantdesk87-',dir=os.environ['RUNNER_TEMP']))
+              with zipfile.ZipFile(archive) as z:
+                  for entry in z.infolist():
+                      p=Path(entry.filename)
+                      if p.is_absolute() or '..' in p.parts or '\\' in entry.filename:
+                          raise SystemExit('::error::Unsafe path in source ZIP')
+                  z.extractall(destination)
+              candidates=[destination]+[p for p in destination.iterdir() if p.is_dir()]
+              where=next((p for p in candidates if project(p)),None)
+          else:
+              where=root if project(root) else None
+          if where is None:
+              raise SystemExit('::error::Upload QuantDesk87_2Year_Source.zip to the repository root, and this YML to .github/workflows/.')
+          with open(os.environ['GITHUB_ENV'],'a') as env:env.write('PROJECT_ROOT='+str(where)+'\n')
+          print('V8.7 root:',where)
+          PY
+
+      - name: Install Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Verify Java history date logic
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/quantdesk-classes"
+          P="$PROJECT_ROOT/android-app/app/src/main/java/com/quantdesk/v85"
+          javac -encoding UTF-8 -d "$RUNNER_TEMP/quantdesk-classes" \
+            "$P/MarketRules.java" "$P/HarvestPolicy.java" "$P/DailyBar.java" \
+            "$PROJECT_ROOT/tests/MarketRulesTest.java" "$PROJECT_ROOT/tests/HarvestPolicyTest.java" "$PROJECT_ROOT/tests/DailyBarTest.java"
+          java -cp "$RUNNER_TEMP/quantdesk-classes" MarketRulesTest
+          java -cp "$RUNNER_TEMP/quantdesk-classes" HarvestPolicyTest
+          java -cp "$RUNNER_TEMP/quantdesk-classes" DailyBarTest
+
+      - name: Verify collection/database integration contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install -e "$PROJECT_ROOT/collector" pytest httpx
+          PYTHONPATH="$PROJECT_ROOT/collector" python -m pytest -q "$PROJECT_ROOT/tests"
+          cd "$PROJECT_ROOT"
+          node --test tests/*.test.cjs
+
+      - name: Install Android SDK (no deprecated tools package)
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
+
+      - name: Install API 35 and build-tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager --install 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Configure Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build downloadable Android APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_ROOT/android-app"
+          gradle --no-daemon --stacktrace :app:assembleDebug
+          test -s app/build/outputs/apk/debug/app-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/QuantDesk-V8.7-TwoYear-debug.apk"
+
+      - name: Upload debug APK to Actions artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: QuantDesk-V8.7-TwoYear-APK
+          path: QuantDesk-V8.7-TwoYear-debug.apk
+          if-no-files-found: error
+          retention-days: 14
