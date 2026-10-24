@@ -1,0 +1,144 @@
+name: QuantDesk V8.5 - Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Works with sources unpacked at repository root, in one subdirectory,
+      # or with a source ZIP uploaded directly to the repository root.
+      - name: Locate source and unpack uploaded ZIP if needed
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import os, tempfile, zipfile, sys
+
+          repo = Path(os.environ['GITHUB_WORKSPACE']).resolve()
+
+          def locate(directory):
+              matches = [directory]
+              matches += [p.parent.parent for p in directory.rglob('collector/pyproject.toml')]
+              for path in matches:
+                  if (path / 'collector' / 'pyproject.toml').is_file() and (path / 'android-app' / 'settings.gradle').is_file() and (path / 'tests').is_dir():
+                      return path.resolve()
+              return None
+
+          def source_archive(path):
+              try:
+                  with zipfile.ZipFile(path) as z:
+                      names = [n.replace('\\', '/') for n in z.namelist()]
+                      return any(n.endswith('collector/pyproject.toml') for n in names) and any(n.endswith('android-app/settings.gradle') for n in names)
+              except (zipfile.BadZipFile, OSError):
+                  return False
+
+          project = None
+          priority_zip = repo / 'QuantDesk85_CollectorFix_Source.zip'
+          if priority_zip.is_file():
+              archives = [priority_zip]
+          else:
+              archives = []
+              project = locate(repo)
+              if project is None:
+                  archives = [p for p in sorted(repo.glob('*.zip')) if source_archive(p)]
+
+          if archives:
+              archive = archives[-1]
+              print(f'Found uploaded source archive: {archive.name}')
+              if not source_archive(archive):
+                  sys.exit(f'::error::Invalid source ZIP: {archive.name}; missing collector or android-app.')
+              destination = Path(tempfile.mkdtemp(prefix='quantdesk85-', dir=os.environ['RUNNER_TEMP']))
+              with zipfile.ZipFile(archive) as z:
+                  for info in z.infolist():
+                      p = Path(info.filename)
+                      if p.is_absolute() or '..' in p.parts or info.filename.startswith('\\'):
+                          sys.exit('::error::Archive has an unsafe path.')
+                  z.extractall(destination)
+              project = locate(destination)
+
+          if project is None:
+              print('Repository top-level entries:', ', '.join(sorted(x.name for x in repo.iterdir())))
+              sys.exit('::error::Project is missing. Upload QuantDesk85_CollectorFix_Source.zip to repository root OR extract it and upload collector/, android-app/, tests/ and .github/. Do NOT upload only the YML.')
+
+          print(f'Found project at: {project}')
+          print(f'Python package: {project / "collector/pyproject.toml"}')
+          print(f'Android project: {project / "android-app/settings.gradle"}')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as f:
+              f.write('PROJECT_DIR=' + str(project) + '\n')
+          PY
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
+
+      - name: Install Android SDK 35
+        run: |
+          sdkmanager --install 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Install collector and run Python tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "$PROJECT_DIR/collector/pyproject.toml" || { echo '::error::collector/pyproject.toml is missing'; exit 1; }
+          python -m pip install -e "$PROJECT_DIR/collector" pytest httpx
+          python -m pytest -q "$PROJECT_DIR/tests"
+
+      - name: Run JavaScript tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          node --test tests/*.test.cjs
+
+      - name: Build Android debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR/android-app"
+          gradle --no-daemon :app:assembleDebug
+
+      - name: Export APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp "$PROJECT_DIR/android-app/app/build/outputs/apk/debug/app-debug.apk" "$GITHUB_WORKSPACE/QuantDesk-V8.5-debug.apk"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: QuantDesk-V8.5-APK
+          path: QuantDesk-V8.5-debug.apk
+          if-no-files-found: error
+          retention-days: 14
