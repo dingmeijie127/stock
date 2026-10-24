@@ -1,0 +1,119 @@
+name: QuantDesk V8.8.1 - A-share 2-year collector APK
+run-name: 'V8.8.1 A-share build #${{ github.run_number }}'
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/QD881_Build.yml'
+      - 'QD881_Source.zip'
+permissions:
+  contents: read
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Extract matching source ZIP only
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,zipfile
+          z=Path('QD881_Source.zip')
+          if not z.is_file():
+              raise SystemExit('::error::QD881_Source.zip must exist at repository root')
+          target=Path(os.environ['RUNNER_TEMP'])/'qd88src'
+          target.mkdir(parents=True,exist_ok=True)
+          with zipfile.ZipFile(z) as archive:
+              for item in archive.infolist():
+                  p=Path(item.filename)
+                  if p.is_absolute() or '..' in p.parts or '\\' in item.filename:
+                      raise SystemExit('::error::Unsafe ZIP path: '+item.filename)
+              archive.extractall(target)
+          required=['android-app/app/build.gradle','android-app/app/src/main/java/com/quantdesk/download/MainActivity.java',
+                    'android-app/app/src/main/java/com/quantdesk/download/HarvestService.java',
+                    'scripts/build_universe.py','tests/test_universe.py']
+          if not all((target/p).is_file() for p in required):
+              raise SystemExit('::error::QD881_Source.zip is incomplete. No old ZIP fallback.')
+          gradle=(target/'android-app/app/build.gradle').read_text()
+          if "versionCode 881" not in gradle or "applicationId 'com.quantdesk.asharecollector88'" not in gradle:
+              raise SystemExit('::error::Wrong source ZIP version / applicationId')
+          with open(os.environ['GITHUB_ENV'],'a') as e:e.write('APP_SOURCE='+str(target)+'\n')
+          print('Using only:',z,'size=',z.stat().st_size)
+          PY
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Run collector source tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install pytest PyYAML
+          python -m pytest -q "$APP_SOURCE/tests"
+      - name: Download and validate REAL A-share universe for APK assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install akshare baostock pandas openpyxl
+          python "$APP_SOURCE/scripts/build_universe.py" \
+            --output "$APP_SOURCE/android-app/app/src/main/assets" --min-count 3500
+          test -s "$APP_SOURCE/android-app/app/src/main/assets/universe.tsv"
+          python - <<'PY'
+          import csv,json,os
+          from pathlib import Path
+          root=Path(os.environ['APP_SOURCE'])/'android-app/app/src/main/assets'
+          with (root/'universe.tsv').open(encoding='utf-8',newline='') as f:
+              rows=list(csv.DictReader(f,delimiter='\t'))
+          meta=json.loads((root/'universe_meta.json').read_text(encoding='utf-8'))
+          assert len(rows)>=3500 and meta['count']==len(rows), 'Unverified real symbol count'
+          assert meta['source']!='test_fixture'
+          print('Real A-share symbols bundled into APK:',len(rows),'source:',meta['source'])
+          PY
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Compile and run pure Java daily-bar tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/qd88-javac"
+          javac -encoding UTF-8 -d "$RUNNER_TEMP/qd88-javac" \
+            "$APP_SOURCE/android-app/app/src/main/java/com/quantdesk/download/Bar.java" \
+            "$APP_SOURCE/tests/java/BarTest.java"
+          java -cp "$RUNNER_TEMP/qd88-javac" com.quantdesk.download.BarTest
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
+      - name: Install Android API 35 + build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager --install 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Compile ACTUAL APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$APP_SOURCE/android-app"
+          gradle --no-daemon --stacktrace :app:assembleDebug
+          test -s app/build/outputs/apk/debug/app-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/QuantDesk881-AshareCollector-debug.apk"
+      - name: Publish APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: QuantDesk881-AshareCollector-APK
+          path: QuantDesk881-AshareCollector-debug.apk
+          if-no-files-found: error
+          retention-days: 14
