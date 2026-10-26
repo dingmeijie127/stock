@@ -1,5 +1,5 @@
-name: QuantDesk V9.1.3 - DB-first Financial Sync APK
-run-name: 'V9.1.3 DB-first financial build #${{ github.run_number }}'
+name: QuantDesk V9.1.3 - HK daily K repair APK
+run-name: 'V9.1.3 HK daily repair build #${{ github.run_number }}'
 
 on:
   workflow_dispatch:
@@ -41,8 +41,13 @@ jobs:
                     'android-app/app/src/main/java/com/quantdesk/download/HistoryGapPlanner.java',
                     'android-app/app/src/main/java/com/quantdesk/download/FinanceCoveragePlanner.java',
                     'scripts/build_universe.py','scripts/build_hk_universe.py','tests/test_user_flows_v913.py']
-          if not all((target/p).is_file() for p in required):
-              raise SystemExit('::error::QD913_Source.zip is incomplete. No old ZIP fallback.')
+          missing=[p for p in required if not (target/p).is_file()]
+          if missing:
+              raise SystemExit('::error::QD913_Source.zip missing required files: '+', '.join(missing))
+          workflow=target/'.github/workflows/QD913_Build.yml'
+          committed=Path('.github/workflows/QD913_Build.yml')
+          if not workflow.is_file() or workflow.read_bytes()!=committed.read_bytes():
+              raise SystemExit('::error::Source ZIP and workflow mismatch. Upload BOTH matching V9.1.3 files.')
           gradle=(target/'android-app/app/build.gradle').read_text()
           if "versionCode 913" not in gradle or "applicationId 'com.quantdesk.asharecollector88'" not in gradle:
               raise SystemExit('::error::Wrong source ZIP version / applicationId')
