@@ -35,16 +35,22 @@ jobs:
             exit 1
           fi
           if [[ $present -eq 0 ]]; then
-            echo '::error::FiveLab01 needs its own persistent signing identity. Configure all four QD_FIVELAB01_* GitHub Secrets; never reuse another experiment keystore.'
-            exit 1
+            echo '::warning::No FiveLab01 signing Secrets. Building a DEBUG test APK with a runner-generated signing key. It may not update previous APK builds. Back up database and five paper accounts before uninstalling.'
+            echo 'FIVELAB_SIGNING_MODE=debug' >> "$GITHUB_ENV"
+          else
+            echo 'Dedicated FiveLab01 RELEASE signing configured.'
+            echo 'FIVELAB_SIGNING_MODE=release' >> "$GITHUB_ENV"
           fi
-          echo 'FiveLab01 dedicated release signing configured.' 
       - name: Prepare dedicated FiveLab01 signing
         env:
           QD_KEYSTORE_B64: ${{ secrets.QD_FIVELAB01_KEYSTORE_B64 }}
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "${FIVELAB_SIGNING_MODE:-}" == debug ]]; then
+            echo 'No persistent keystore configured; Gradle will create a dedicated debug key for this test build.'
+            exit 0
+          fi
           if [[ -z "${QD_KEYSTORE_B64:-}" ]]; then echo '::error::Dedicated FiveLab01 keystore is missing'; exit 1; fi
           printf '%s' "$QD_KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/qd-five-lab01-signing.jks"
           chmod 600 "$RUNNER_TEMP/qd-five-lab01-signing.jks"
@@ -243,31 +249,42 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-      - name: Build FiveLab01 APK (dedicated stable release signer required)
+      - name: Build FiveLab01 APK (debug test or dedicated signed release)
         shell: bash
         env:
-          QD_KEYSTORE_B64: ${{ secrets.QD_FIVELAB01_KEYSTORE_B64 }}
           QD_SIGNING_ALIAS: ${{ secrets.QD_FIVELAB01_SIGNING_ALIAS }}
           QD_SIGNING_STORE_PASSWORD: ${{ secrets.QD_FIVELAB01_SIGNING_STORE_PASSWORD }}
           QD_SIGNING_KEY_PASSWORD: ${{ secrets.QD_FIVELAB01_SIGNING_KEY_PASSWORD }}
         run: |
           set -euo pipefail
           cd "$APP_SOURCE/android-app"
-          gradle --no-daemon --stacktrace :app:assembleRelease
-          test -s app/build/outputs/apk/release/app-release.apk
-          cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/QuantDesk916-FiveLab01-Ashare-Paper.apk"
+          if [[ "$FIVELAB_SIGNING_MODE" == release ]]; then
+            gradle --no-daemon --stacktrace :app:assembleRelease
+            test -s app/build/outputs/apk/release/app-release.apk
+            cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/QuantDesk917-FiveStrategies-Ashare-Paper.apk"
+          elif [[ "$FIVELAB_SIGNING_MODE" == debug ]]; then
+            gradle --no-daemon --stacktrace :app:assembleDebug
+            test -s app/build/outputs/apk/debug/app-debug.apk
+            cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/QuantDesk917-FiveStrategies-Ashare-Paper.apk"
+          else
+            echo '::error::Unknown signing mode'; exit 1
+          fi
       - name: Print APK signer fingerprint and version
         shell: bash
         run: |
           set -euo pipefail
-          APK="$GITHUB_WORKSPACE/QuantDesk916-FiveLab01-Ashare-Paper.apk"
+          APK="$GITHUB_WORKSPACE/QuantDesk917-FiveStrategies-Ashare-Paper.apk"
           test -s "$APK"
           "${ANDROID_HOME}/build-tools/35.0.0/apksigner" verify --print-certs "$APK"
-          echo '::notice::Independent FiveLab01 applicationId and release keystore. Keep this lab signer stable for future lab updates.' 
+          if [[ "$FIVELAB_SIGNING_MODE" == debug ]]; then
+            echo '::warning::DEBUG APK: signed with a temporary runner key. Upgrading this app in-place may fail; export both databases first.'
+          else
+            echo '::notice::FiveLab01 RELEASE APK: preserve the dedicated signing keystore for all future updates.'
+          fi 
       - name: Publish APK
         uses: actions/upload-artifact@v4
         with:
-          name: QuantDesk916-FiveLab01-Ashare-Paper-APK
-          path: QuantDesk916-FiveLab01-Ashare-Paper.apk
+          name: QuantDesk917-FiveStrategies-Ashare-Paper-APK
+          path: QuantDesk917-FiveStrategies-Ashare-Paper.apk
           if-no-files-found: error
           retention-days: 14
