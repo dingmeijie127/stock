@@ -1,0 +1,292 @@
+name: QuantDesk Five Strategy Lab01 V9.1.9 - independent APK signature
+run-name: 'Five Strategy Lab01 experimental build #${{ github.run_number }}'
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/QD919_FiveLab_Build.yml'
+      - 'QD919_FiveLab_Source.zip'
+permissions:
+  contents: read
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Validate signing configuration
+        shell: bash
+        env:
+          QD_KEYSTORE_B64: ${{ secrets.QD_FIVELAB01_KEYSTORE_B64 }}
+          QD_SIGNING_ALIAS: ${{ secrets.QD_FIVELAB01_SIGNING_ALIAS }}
+          QD_SIGNING_STORE_PASSWORD: ${{ secrets.QD_FIVELAB01_SIGNING_STORE_PASSWORD }}
+          QD_SIGNING_KEY_PASSWORD: ${{ secrets.QD_FIVELAB01_SIGNING_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          present=0
+          for var in QD_KEYSTORE_B64 QD_SIGNING_ALIAS QD_SIGNING_STORE_PASSWORD QD_SIGNING_KEY_PASSWORD; do
+            if [[ -n "${!var:-}" ]]; then ((present+=1)); fi
+          done
+          if [[ $present -ne 0 && $present -ne 4 ]]; then
+            echo '::error::Only some signing Secrets are configured. Set ALL FOUR or NONE; do not silently build an incompatible APK.'
+            exit 1
+          fi
+          if [[ $present -eq 0 ]]; then
+            echo '::warning::No FiveLab01 signing Secrets. Building a DEBUG test APK with a runner-generated signing key. It may not update previous APK builds. Back up database and five paper accounts before uninstalling.'
+            echo 'FIVELAB_SIGNING_MODE=debug' >> "$GITHUB_ENV"
+          else
+            echo 'Dedicated FiveLab01 RELEASE signing configured.'
+            echo 'FIVELAB_SIGNING_MODE=release' >> "$GITHUB_ENV"
+          fi
+      - name: Prepare dedicated FiveLab01 signing
+        env:
+          QD_KEYSTORE_B64: ${{ secrets.QD_FIVELAB01_KEYSTORE_B64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${FIVELAB_SIGNING_MODE:-}" == debug ]]; then
+            echo 'No persistent keystore configured; Gradle will create a dedicated debug key for this test build.'
+            exit 0
+          fi
+          if [[ -z "${QD_KEYSTORE_B64:-}" ]]; then echo '::error::Dedicated FiveLab01 keystore is missing'; exit 1; fi
+          printf '%s' "$QD_KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/qd-five-lab01-signing.jks"
+          chmod 600 "$RUNNER_TEMP/qd-five-lab01-signing.jks"
+          echo "QD_SIGNING_KEYSTORE_FILE=$RUNNER_TEMP/qd-five-lab01-signing.jks" >> "$GITHUB_ENV"
+      - name: Extract matching source ZIP only
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,zipfile
+          z=Path('QD919_FiveLab_Source.zip')
+          if not z.is_file():
+              raise SystemExit('::error::QD919_FiveLab_Source.zip must exist at repository root')
+          target=Path(os.environ['RUNNER_TEMP'])/'qd919fivelabsrc'
+          target.mkdir(parents=True,exist_ok=True)
+          with zipfile.ZipFile(z) as archive:
+              for item in archive.infolist():
+                  p=Path(item.filename)
+                  if p.is_absolute() or '..' in p.parts or '\\' in item.filename:
+                      raise SystemExit('::error::Unsafe ZIP path: '+item.filename)
+              archive.extractall(target)
+          required=['android-app/app/build.gradle','android-app/app/src/main/java/com/quantdesk/download/MainActivity.java',
+                    'android-app/app/src/main/java/com/quantdesk/download/HarvestService.java',
+                    'android-app/app/src/main/java/com/quantdesk/download/ManualFastSync.java',
+                    'android-app/app/src/main/java/com/quantdesk/download/HistoryGapPlanner.java',
+                    'android-app/app/src/main/java/com/quantdesk/download/FinanceCoveragePlanner.java',
+                    'scripts/build_universe.py','tests/test_user_flows_v914.py',
+                    'android-app/app/src/main/java/com/quantdesk/download/AQuantFactors.java',
+                    'tests/java/AQuantFactorsTest.java','tests/test_a_only_quant_v914.py',
+                    'android-app/app/src/main/java/com/quantdesk/download/FinanceLocalAudit.java',
+                    'tests/java/FinanceLocalAuditTest.java','tests/test_finance_local_audit_v915.py',
+                    'tests/network_a_canary.py',
+                    'android-app/app/src/main/java/com/quantdesk/download/SwingStrategy.java',
+                    'android-app/app/src/main/java/com/quantdesk/download/PaperTradingStore.java',
+                    'android-app/app/src/main/java/com/quantdesk/download/PaperTradeActivity.java',
+                    'tests/java/SwingStrategyTest.java',
+                    'android-app/app/src/main/java/com/quantdesk/download/PaperTradeRules.java',
+                    'tests/java/PaperTradeRulesTest.java',
+                    'tests/test_swing_paper_v916.py','tests/test_rsi2lab_isolation.py',
+                    'android-app/app/src/main/java/com/quantdesk/download/MarketRegime.java',
+                    'android-app/app/src/main/java/com/quantdesk/download/StrategySuite.java',
+                    'android-app/app/src/main/java/com/quantdesk/download/RiskPolicy.java',
+                    'android-app/app/src/main/java/com/quantdesk/download/StrategyValidator.java',
+                    'android-app/app/src/main/java/com/quantdesk/download/PaperAutoWorker.java',
+                    'android-app/app/src/main/java/com/quantdesk/download/EquityCurveView.java',
+                    'tests/java/StrategySuiteTest.java','tests/java/StrategyValidatorTest.java',
+                    'tests/test_five_strategy_lab.py']
+          missing=[p for p in required if not (target/p).is_file()]
+          if missing:
+              raise SystemExit('::error::QD919_FiveLab_Source.zip missing required files: '+', '.join(missing))
+          workflow=target/'.github/workflows/QD919_FiveLab_Build.yml'
+          committed=Path('.github/workflows/QD919_FiveLab_Build.yml')
+          if not workflow.is_file() or workflow.read_bytes()!=committed.read_bytes():
+              raise SystemExit('::error::Source ZIP and workflow mismatch. Upload BOTH matching FiveLab01 files.')
+          gradle=(target/'android-app/app/build.gradle').read_text()
+          if "versionCode 919" not in gradle or "applicationId 'com.quantdesk.lab.fivestrategy917'" not in gradle:
+              raise SystemExit('::error::Wrong source ZIP version / applicationId')
+          with open(os.environ['GITHUB_ENV'],'a') as e:e.write('APP_SOURCE='+str(target)+'\n')
+          print('Using only:',z,'size=',z.stat().st_size)
+          PY
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Run collector source tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install pytest PyYAML
+          python -m pytest -q "$APP_SOURCE/tests"
+      - name: Diagnose live A-share daily provider (non-blocking; not APK certification)
+        continue-on-error: true
+        shell: bash
+        run: |
+          python3 "$APP_SOURCE/tests/network_a_canary.py"
+      - name: Download and validate REAL A-share universe for APK assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install akshare baostock pandas openpyxl
+          python "$APP_SOURCE/scripts/build_universe.py" \
+            --output "$APP_SOURCE/android-app/app/src/main/assets" --min-count 3500
+          test -s "$APP_SOURCE/android-app/app/src/main/assets/universe.tsv"
+          python - <<'PY'
+          import csv,json,os
+          from pathlib import Path
+          root=Path(os.environ['APP_SOURCE'])/'android-app/app/src/main/assets'
+          with (root/'universe.tsv').open(encoding='utf-8',newline='') as f:
+              rows=list(csv.DictReader(f,delimiter='\t'))
+          meta=json.loads((root/'universe_meta.json').read_text(encoding='utf-8'))
+          assert len(rows)>=3500 and meta['count']==len(rows), 'Unverified real symbol count'
+          assert meta['source']!='test_fixture'
+          print('Real A-share symbols bundled into APK:',len(rows),'source:',meta['source'])
+          PY
+      - name: Compile and run pure Java daily-bar tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/qd910-javac"
+          javac -encoding UTF-8 -d "$RUNNER_TEMP/qd910-javac" \
+            "$APP_SOURCE/android-app/app/src/main/java/com/quantdesk/download/Bar.java" \
+            "$APP_SOURCE/tests/java/BarTest.java" \
+            "$APP_SOURCE/android-app/app/src/main/java/com/quantdesk/download/HKBarQuality.java" \
+            "$APP_SOURCE/tests/java/HKBarQualityTest.java" \
+            "$APP_SOURCE/android-app/app/src/main/java/com/quantdesk/download/RangePlanner.java" \
+            "$APP_SOURCE/tests/java/RangePlannerTest.java" \
+            "$APP_SOURCE/android-app/app/src/main/java/com/quantdesk/download/HistoryGapPlanner.java" \
+            "$APP_SOURCE/tests/java/HistoryGapPlannerTest.java" \
+            "$APP_SOURCE/android-app/app/src/main/java/com/quantdesk/download/ScheduleClock.java" \
+            "$APP_SOURCE/tests/java/ScheduleClockTest.java" \
+            "$APP_SOURCE/android-app/app/src/main/java/com/quantdesk/download/SqliteBackupFormat.java" \
+            "$APP_SOURCE/tests/java/SqliteBackupFormatTest.java"
+          javac -encoding UTF-8 -d "$RUNNER_TEMP/qd910-javac" \
+            "$APP_SOURCE/android-app/app/src/main/java/com/quantdesk/download/Bar.java" \
+            "$APP_SOURCE/android-app/app/src/main/java/com/quantdesk/download/TencentBatchQuotes.java" \
+            "$APP_SOURCE/tests/java/TencentBatchQuotesTest.java"
+          java -cp "$RUNNER_TEMP/qd910-javac" com.quantdesk.download.TencentBatchQuotesTest
+          java -cp "$RUNNER_TEMP/qd910-javac" com.quantdesk.download.BarTest
+          javac -encoding UTF-8 -d "$RUNNER_TEMP/qd910-javac" \
+            "$APP_SOURCE/android-app/app/src/main/java/com/quantdesk/download/AQuantFactors.java" \
+            "$APP_SOURCE/tests/java/AQuantFactorsTest.java"
+          java -cp "$RUNNER_TEMP/qd910-javac" com.quantdesk.download.AQuantFactorsTest
+          javac -encoding UTF-8 -d "$RUNNER_TEMP/qd910-javac" \
+            "$APP_SOURCE/android-app/app/src/main/java/com/quantdesk/download/SwingStrategy.java" \
+            "$APP_SOURCE/tests/java/SwingStrategyTest.java"
+          java -cp "$RUNNER_TEMP/qd910-javac" com.quantdesk.download.SwingStrategyTest
+          javac -encoding UTF-8 -d "$RUNNER_TEMP/qd910-javac" \
+            "$APP_SOURCE/android-app/app/src/main/java/com/quantdesk/download/SwingStrategy.java" \
+            "$APP_SOURCE/android-app/app/src/main/java/com/quantdesk/download/PaperTradeRules.java" \
+            "$APP_SOURCE/tests/java/PaperTradeRulesTest.java"
+          java -cp "$RUNNER_TEMP/qd910-javac" com.quantdesk.download.PaperTradeRulesTest
+          javac -encoding UTF-8 -d "$RUNNER_TEMP/qd910-javac" \
+            "$APP_SOURCE/android-app/app/src/main/java/com/quantdesk/download/SwingStrategy.java" \
+            "$APP_SOURCE/android-app/app/src/main/java/com/quantdesk/download/PaperTradeRules.java" \
+            "$APP_SOURCE/android-app/app/src/main/java/com/quantdesk/download/MarketRegime.java" \
+            "$APP_SOURCE/android-app/app/src/main/java/com/quantdesk/download/StrategySuite.java" \
+            "$APP_SOURCE/android-app/app/src/main/java/com/quantdesk/download/RiskPolicy.java" \
+            "$APP_SOURCE/android-app/app/src/main/java/com/quantdesk/download/StrategyValidator.java" \
+            "$APP_SOURCE/tests/java/StrategySuiteTest.java" \
+            "$APP_SOURCE/tests/java/StrategyValidatorTest.java"
+          java -cp "$RUNNER_TEMP/qd910-javac" com.quantdesk.download.StrategySuiteTest
+          java -cp "$RUNNER_TEMP/qd910-javac" com.quantdesk.download.StrategyValidatorTest
+          javac -encoding UTF-8 -d "$RUNNER_TEMP/qd910-javac" \
+            "$APP_SOURCE/android-app/app/src/main/java/com/quantdesk/download/FinanceLocalAudit.java" \
+            "$APP_SOURCE/tests/java/FinanceLocalAuditTest.java"
+          java -cp "$RUNNER_TEMP/qd910-javac" com.quantdesk.download.FinanceLocalAuditTest
+          java -cp "$RUNNER_TEMP/qd910-javac" com.quantdesk.download.HKBarQualityTest
+          mkdir -p "$RUNNER_TEMP/qd910-hk-parser"
+          javac -encoding UTF-8 -d "$RUNNER_TEMP/qd910-hk-parser" \
+            "$APP_SOURCE"/tests/jsonstub/org/json/*.java \
+            "$APP_SOURCE/android-app/app/src/main/java/com/quantdesk/download/Bar.java" \
+            "$APP_SOURCE/android-app/app/src/main/java/com/quantdesk/download/HKBarQuality.java" \
+            "$APP_SOURCE/android-app/app/src/main/java/com/quantdesk/download/DailySources.java" \
+            "$APP_SOURCE/android-app/app/src/main/java/com/quantdesk/download/HongKongSources.java" \
+            "$APP_SOURCE/tests/java/HKProvidersTest.java"
+          java -cp "$RUNNER_TEMP/qd910-hk-parser" com.quantdesk.download.HKProvidersTest
+          java -cp "$RUNNER_TEMP/qd910-javac" com.quantdesk.download.RangePlannerTest
+          java -cp "$RUNNER_TEMP/qd910-javac" com.quantdesk.download.HistoryGapPlannerTest
+          javac -encoding UTF-8 -d "$RUNNER_TEMP/qd910-javac" \
+            "$APP_SOURCE/tests/java/AndroidSyntaxCheck.java"
+          java -cp "$RUNNER_TEMP/qd910-javac" com.quantdesk.download.AndroidSyntaxCheck \
+            "$APP_SOURCE"/android-app/app/src/main/java/com/quantdesk/download/*.java
+          java -cp "$RUNNER_TEMP/qd910-javac" com.quantdesk.download.ScheduleClockTest
+          java -cp "$RUNNER_TEMP/qd910-javac" com.quantdesk.download.SqliteBackupFormatTest
+          javac -encoding UTF-8 -d "$RUNNER_TEMP/qd910-javac" \
+            "$APP_SOURCE/android-app/app/src/main/java/com/quantdesk/download/ImportProgressMeter.java" \
+            "$APP_SOURCE/tests/java/ImportProgressMeterTest.java"
+          java -cp "$RUNNER_TEMP/qd910-javac" com.quantdesk.download.ImportProgressMeterTest
+          mkdir -p "$RUNNER_TEMP/qd910-finance-test"
+          javac -encoding UTF-8 -d "$RUNNER_TEMP/qd910-finance-test" \
+            "$APP_SOURCE"/tests/jsonstub/org/json/*.java \
+            "$APP_SOURCE/android-app/app/src/main/java/com/quantdesk/download/FinancialSources.java" \
+            "$APP_SOURCE/tests/java/PublicFinanceTest.java"
+          java -cp "$RUNNER_TEMP/qd910-finance-test" com.quantdesk.download.PublicFinanceTest
+          javac -encoding UTF-8 -d "$RUNNER_TEMP/qd910-finance-test" \
+            "$APP_SOURCE/android-app/app/src/main/java/com/quantdesk/download/FinanceRefreshPolicy.java" \
+            "$APP_SOURCE/tests/java/FinanceRefreshPolicyTest.java" \
+            "$APP_SOURCE/android-app/app/src/main/java/com/quantdesk/download/FinanceCoveragePlanner.java" \
+            "$APP_SOURCE/tests/java/FinanceCoveragePlannerTest.java"
+          java -cp "$RUNNER_TEMP/qd910-finance-test" com.quantdesk.download.FinanceRefreshPolicyTest
+          java -cp "$RUNNER_TEMP/qd910-finance-test" com.quantdesk.download.FinanceCoveragePlannerTest
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
+      - name: Install Android API 35 + build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager --install 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Build FiveLab01 APK (debug test or dedicated signed release)
+        shell: bash
+        env:
+          QD_SIGNING_ALIAS: ${{ secrets.QD_FIVELAB01_SIGNING_ALIAS }}
+          QD_SIGNING_STORE_PASSWORD: ${{ secrets.QD_FIVELAB01_SIGNING_STORE_PASSWORD }}
+          QD_SIGNING_KEY_PASSWORD: ${{ secrets.QD_FIVELAB01_SIGNING_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          cd "$APP_SOURCE/android-app"
+          if [[ "$FIVELAB_SIGNING_MODE" == release ]]; then
+            gradle --no-daemon --stacktrace :app:assembleRelease
+            test -s app/build/outputs/apk/release/app-release.apk
+            cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/QuantDesk919-FiveStrategies-Ashare-Paper.apk"
+          elif [[ "$FIVELAB_SIGNING_MODE" == debug ]]; then
+            gradle --no-daemon --stacktrace :app:assembleDebug
+            test -s app/build/outputs/apk/debug/app-debug.apk
+            cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/QuantDesk919-FiveStrategies-Ashare-Paper.apk"
+          else
+            echo '::error::Unknown signing mode'; exit 1
+          fi
+      - name: Print APK signer fingerprint and version
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="$GITHUB_WORKSPACE/QuantDesk919-FiveStrategies-Ashare-Paper.apk"
+          test -s "$APK"
+          "${ANDROID_HOME}/build-tools/35.0.0/apksigner" verify --print-certs "$APK"
+          if [[ "$FIVELAB_SIGNING_MODE" == debug ]]; then
+            echo '::warning::DEBUG APK: signed with a temporary runner key. Upgrading this app in-place may fail; export both databases first.'
+          else
+            echo '::notice::FiveLab01 RELEASE APK: preserve the dedicated signing keystore for all future updates.'
+          fi 
+      - name: Publish APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: QuantDesk919-FiveStrategies-Ashare-Paper-APK
+          path: QuantDesk919-FiveStrategies-Ashare-Paper.apk
+          if-no-files-found: error
+          retention-days: 14
