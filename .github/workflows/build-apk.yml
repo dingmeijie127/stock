@@ -1,10 +1,21 @@
 name: TideQuant Android APK
+run-name: TideQuant v0.3.4 · ${{ github.event_name }} · ${{ github.ref_name }}
 
 on:
   workflow_dispatch:
   push:
     branches: [main, master]
-  pull_request:
+    paths:
+      - 'TideQuant-v0.3.4-Android-Project.zip'
+      - 'TideQuant-Android-Project.zip'
+      - 'TideQuant-Android-GitHub-Ready.zip'
+      - '.github/workflows/build-apk.yml'
+      - 'app/**'
+      - 'research/**'
+      - 'settings.gradle'
+      - 'build.gradle'
+      - 'gradle.properties'
+      - 'gradle/**'
 
 permissions:
   contents: read
@@ -15,74 +26,159 @@ concurrency:
 
 jobs:
   android:
+    name: Validate and build independent Android APK
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - name: Checkout source
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Confirm Android project files
+      # Phone-friendly: the ZIP may be uploaded directly to the repository root.
+      # A versioned archive wins over older archives; source files are the fallback.
+      - name: Prepare source directory
         shell: bash
         run: |
           set -euo pipefail
+          archive=""
+          for candidate in \
+            "TideQuant-Android-Project.zip" \
+            "TideQuant-v0.3.4-Android-Project.zip" \
+            "TideQuant-Android-GitHub-Ready.zip"; do
+            if [[ -f "$candidate" ]]; then archive="$candidate"; break; fi
+          done
+
+          if [[ -n "$archive" ]]; then
+            temp_root="$RUNNER_TEMP/tidequant-source"
+            mkdir -p "$temp_root"
+            unzip -q -o "$archive" -d "$temp_root"
+            settings_file="$(find "$temp_root" -maxdepth 6 -type f -name settings.gradle -print -quit)"
+            if [[ -z "$settings_file" ]]; then
+              echo "ERROR: $archive does not contain settings.gradle" >&2
+              exit 1
+            fi
+            project_root="$(dirname "$settings_file")"
+            echo "Using source archive: $archive"
+          else
+            project_root="$GITHUB_WORKSPACE"
+            if [[ ! -f "$project_root/settings.gradle" ]]; then
+              echo "ERROR: Upload TideQuant-v0.3.4-Android-Project.zip to the repository root, or commit the unpacked project there." >&2
+              exit 1
+            fi
+            echo "Using unpacked Android project from repository root"
+          fi
+          echo "TIDE_PROJECT=$project_root" >> "$GITHUB_ENV"
+
+      - name: Check Android project structure and package ID
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$TIDE_PROJECT"
           test -f settings.gradle
           test -f build.gradle
           test -f app/build.gradle
           test -f app/src/main/AndroidManifest.xml
           test -f app/src/main/java/cn/tidelab/quantpilot/MainActivity.java
-          test -f app/src/main/java/cn/tidelab/quantpilot/SqliteImportEngine.java
-          test -f app/src/main/assets/index.html
-          test -f app/src/main/assets/app.js
+          grep -Eq "applicationId ['\"]cn\.tidelab\.quantpilot['\"]" app/build.gradle
+          echo 'Project structure and independent applicationId verified.'
 
-      - name: Java 17
+      - name: Install Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Android SDK setup - no deprecated tools package
+      # v4 avoids the obsolete SDK 'tools' package requested by older setup versions.
+      - name: Install Android SDK 35
         uses: android-actions/setup-android@v4
         with:
-          packages: ''
+          accept-android-sdk-licenses: true
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
 
-      - name: Install Android SDK 35
-        shell: bash
-        run: |
-          set -euo pipefail
-          sdkmanager --install 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0'
-          sdkmanager --list_installed
-
-      - name: Gradle 8.9
+      - name: Install Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
 
-      - name: Check JavaScript
+      - name: Validate JavaScript and UI smoke test
         shell: bash
         run: |
+          set -euo pipefail
+          cd "$TIDE_PROJECT"
+          node --version
           node --check app/src/main/assets/app.js
           node --check app/src/main/assets/sqlite_import.js
           node --check app/src/main/assets/research_view.js
+          node research/tests/app_smoke.js
 
-      - name: Compile standalone APK
+      - name: Build Debug APK
         shell: bash
-        run: gradle --no-daemon --stacktrace :app:assembleDebug
+        run: |
+          set -euo pipefail
+          cd "$TIDE_PROJECT"
+          gradle --no-daemon --stacktrace :app:assembleDebug
+          apk="app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$apk"
+          aapt="$ANDROID_HOME/build-tools/35.0.0/aapt"
+          test -x "$aapt"
+          "$aapt" dump badging "$apk" | grep -F "package: name='cn.tidelab.quantpilot'"
+          mkdir -p "$GITHUB_WORKSPACE/apk-output"
+          cp "$apk" "$GITHUB_WORKSPACE/apk-output/TideQuant-v0.3.4-debug.apk"
+          sha256sum "$GITHUB_WORKSPACE/apk-output/TideQuant-v0.3.4-debug.apk"
+          ls -lh "$GITHUB_WORKSPACE/apk-output/TideQuant-v0.3.4-debug.apk"
 
-      - name: Publish installable debug APK
+      - name: Publish Debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: TideQuant-Android-APK
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: TideQuant-v0.3.4-Debug-APK
+          path: apk-output/TideQuant-v0.3.4-debug.apk
           if-no-files-found: error
           retention-days: 30
 
-      - name: Python for research tests
+      # Optional stable Release signing. Without all four secrets, Debug still builds normally.
+      - name: Build optional persistently signed Release APK
+        id: release
+        shell: bash
+        env:
+          TIDE_KEYSTORE_BASE64: ${{ secrets.TIDE_KEYSTORE_BASE64 }}
+          TIDE_STORE_PASSWORD: ${{ secrets.TIDE_STORE_PASSWORD }}
+          TIDE_KEY_ALIAS: ${{ secrets.TIDE_KEY_ALIAS }}
+          TIDE_KEY_PASSWORD: ${{ secrets.TIDE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${TIDE_KEYSTORE_BASE64:-}" || -z "${TIDE_STORE_PASSWORD:-}" || -z "${TIDE_KEY_ALIAS:-}" || -z "${TIDE_KEY_PASSWORD:-}" ]]; then
+            echo "built=false" >> "$GITHUB_OUTPUT"
+            echo "No complete Release signing secrets found; skipping signed Release APK."
+            exit 0
+          fi
+          key_path="$RUNNER_TEMP/tide-release.jks"
+          printf '%s' "$TIDE_KEYSTORE_BASE64" | base64 --decode > "$key_path"
+          export TIDE_KEYSTORE_PATH="$key_path"
+          cd "$TIDE_PROJECT"
+          gradle --no-daemon --stacktrace :app:assembleRelease
+          release_apk="app/build/outputs/apk/release/app-release.apk"
+          test -s "$release_apk"
+          mkdir -p "$GITHUB_WORKSPACE/release-output"
+          cp "$release_apk" "$GITHUB_WORKSPACE/release-output/TideQuant-v0.3.4-release.apk"
+          echo "built=true" >> "$GITHUB_OUTPUT"
+
+      - name: Publish signed Release APK
+        if: steps.release.outputs.built == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: TideQuant-v0.3.4-Release-signed-APK
+          path: release-output/TideQuant-v0.3.4-release.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Install Python 3.11 and research test dependencies
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Check backtesting engine (synthetic tests only)
+      - name: Test research engine (synthetic data only)
         shell: bash
         run: |
-          python -m pip install --disable-pip-version-check --quiet numpy pandas pytest
+          set -euo pipefail
+          cd "$TIDE_PROJECT"
+          python -m pip install --disable-pip-version-check --quiet -r requirements-research.txt
           python -m pytest research/tests -q
