@@ -1,12 +1,12 @@
 name: TideQuant Android APK
-run-name: TideQuant v0.3.4 · ${{ github.event_name }} · ${{ github.ref_name }}
+run-name: TideQuant v0.5.0 · ${{ github.event_name }} · ${{ github.ref_name }}
 
 on:
   workflow_dispatch:
   push:
     branches: [main, master]
     paths:
-      - 'TideQuant-v0.3.4-Android-Project.zip'
+      - 'TideQuant-v0.5.0-Android-Project.zip'
       - 'TideQuant-Android-Project.zip'
       - 'TideQuant-Android-GitHub-Ready.zip'
       - '.github/workflows/build-apk.yml'
@@ -41,8 +41,8 @@ jobs:
           set -euo pipefail
           archive=""
           for candidate in \
+            "TideQuant-v0.5.0-Android-Project.zip" \
             "TideQuant-Android-Project.zip" \
-            "TideQuant-v0.3.4-Android-Project.zip" \
             "TideQuant-Android-GitHub-Ready.zip"; do
             if [[ -f "$candidate" ]]; then archive="$candidate"; break; fi
           done
@@ -61,7 +61,7 @@ jobs:
           else
             project_root="$GITHUB_WORKSPACE"
             if [[ ! -f "$project_root/settings.gradle" ]]; then
-              echo "ERROR: Upload TideQuant-v0.3.4-Android-Project.zip to the repository root, or commit the unpacked project there." >&2
+              echo "ERROR: Upload TideQuant-v0.5.0-Android-Project.zip to the repository root, or commit the unpacked project there." >&2
               exit 1
             fi
             echo "Using unpacked Android project from repository root"
@@ -79,6 +79,10 @@ jobs:
           test -f app/src/main/AndroidManifest.xml
           test -f app/src/main/java/cn/tidelab/quantpilot/MainActivity.java
           grep -Eq "applicationId ['\"]cn\.tidelab\.quantpilot['\"]" app/build.gradle
+          grep -Fq "versionName '0.5.0-history-research'" app/build.gradle
+          test -f app/src/main/java/cn/tidelab/quantpilot/QuantCore.java
+          test -f app/src/main/java/cn/tidelab/quantpilot/FullHistoryBacktest.java
+          test -f app/src/main/java/cn/tidelab/quantpilot/HistoricalContext.java
           echo 'Project structure and independent applicationId verified.'
 
       - name: Install Java 17
@@ -110,6 +114,32 @@ jobs:
           node --check app/src/main/assets/research_view.js
           node research/tests/app_smoke.js
 
+      - name: Verify streaming backtest core with synthetic fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$TIDE_PROJECT"
+          mkdir -p "$RUNNER_TEMP/tide-javac"
+          javac -encoding UTF-8 -d "$RUNNER_TEMP/tide-javac" \
+            app/src/main/java/cn/tidelab/quantpilot/QuantCore.java \
+            research/tests/java/CoreCsvSmoke.java
+          python - <<'PYGEN'
+          import csv
+          src='research/sample/DEMO_SYNTHETIC_576_bars.csv'
+          out='/tmp/tide-synthetic-day-sorted.csv'
+          with open(src,encoding='utf-8-sig') as f:
+              reader=csv.reader(f); header=next(reader); rows=list(reader)
+          rows.sort(key=lambda x:(x[1],x[0]))
+          with open(out,'w',encoding='utf-8',newline='') as f:
+              writer=csv.writer(f);writer.writerow(header);writer.writerows(rows)
+          print('SYNTHETIC TEST DATA ONLY:',len(rows),'records')
+          PYGEN
+          java -cp "$RUNNER_TEMP/tide-javac" cn.tidelab.quantpilot.CoreCsvSmoke /tmp/tide-synthetic-day-sorted.csv
+          javac -encoding UTF-8 -d "$RUNNER_TEMP/tide-javac" \
+            app/src/main/java/cn/tidelab/quantpilot/QuantCore.java \
+            research/tests/java/PointInTimeSmoke.java
+          java -cp "$RUNNER_TEMP/tide-javac" cn.tidelab.quantpilot.PointInTimeSmoke /tmp/tide-synthetic-day-sorted.csv
+
       - name: Build Debug APK
         shell: bash
         run: |
@@ -122,15 +152,15 @@ jobs:
           test -x "$aapt"
           "$aapt" dump badging "$apk" | grep -F "package: name='cn.tidelab.quantpilot'"
           mkdir -p "$GITHUB_WORKSPACE/apk-output"
-          cp "$apk" "$GITHUB_WORKSPACE/apk-output/TideQuant-v0.3.4-debug.apk"
-          sha256sum "$GITHUB_WORKSPACE/apk-output/TideQuant-v0.3.4-debug.apk"
-          ls -lh "$GITHUB_WORKSPACE/apk-output/TideQuant-v0.3.4-debug.apk"
+          cp "$apk" "$GITHUB_WORKSPACE/apk-output/TideQuant-v0.5.0-debug.apk"
+          sha256sum "$GITHUB_WORKSPACE/apk-output/TideQuant-v0.5.0-debug.apk"
+          ls -lh "$GITHUB_WORKSPACE/apk-output/TideQuant-v0.5.0-debug.apk"
 
       - name: Publish Debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: TideQuant-v0.3.4-Debug-APK
-          path: apk-output/TideQuant-v0.3.4-debug.apk
+          name: TideQuant-v0.5.0-Debug-APK
+          path: apk-output/TideQuant-v0.5.0-debug.apk
           if-no-files-found: error
           retention-days: 30
 
@@ -158,15 +188,15 @@ jobs:
           release_apk="app/build/outputs/apk/release/app-release.apk"
           test -s "$release_apk"
           mkdir -p "$GITHUB_WORKSPACE/release-output"
-          cp "$release_apk" "$GITHUB_WORKSPACE/release-output/TideQuant-v0.3.4-release.apk"
+          cp "$release_apk" "$GITHUB_WORKSPACE/release-output/TideQuant-v0.5.0-release.apk"
           echo "built=true" >> "$GITHUB_OUTPUT"
 
       - name: Publish signed Release APK
         if: steps.release.outputs.built == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: TideQuant-v0.3.4-Release-signed-APK
-          path: release-output/TideQuant-v0.3.4-release.apk
+          name: TideQuant-v0.5.0-Release-signed-APK
+          path: release-output/TideQuant-v0.5.0-release.apk
           if-no-files-found: error
           retention-days: 30
 
